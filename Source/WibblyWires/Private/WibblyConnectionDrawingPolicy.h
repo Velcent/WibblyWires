@@ -24,12 +24,12 @@ struct FWireId
 
 	FORCEINLINE bool operator ==(const FWireId& Other) const
 	{
-		return StartPin == Other.StartPin && EndPin == Other.EndPin;
+        return StartPinHandle == Other.StartPinHandle && EndPinHandle == Other.EndPinHandle;
 	}
 
 	FORCEINLINE bool operator !=(const FWireId& Other) const
 	{
-		return StartPin != Other.StartPin && EndPin != Other.EndPin;
+        return StartPinHandle != Other.StartPinHandle || EndPinHandle != Other.EndPinHandle;
 	}
 
 	friend uint32 GetTypeHash(const FWireId& WireId)
