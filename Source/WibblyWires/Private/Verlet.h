@@ -21,6 +21,7 @@ struct FVerletPoint
 	FVectorType LastPosition;
 	FVectorType Acceleration;
 	bool bIsPinned = false;
+	float PinnedTime = 0.f;
 
 	FVerletPoint(FVectorType InitialPosition, bool IsPinned = false, FVectorType InitialVelocity = FVectorType::ZeroVector)
 	{
@@ -176,19 +177,18 @@ struct FVerletChain
 		static const float MaxDeltaTime = 1.0f / 30.f;
 		DeltaTime = FMath::Min(MaxDeltaTime, DeltaTime);
 
-		// Dinonaktifkan supaya chain tidak menyusut saat jatuh
-		// if (bHasBroken)
-		// {
-		// 	ShrinkSticks(DeltaTime);
-		// }
-
-		float TimeSinceCreated = GetSecondsSinceCreated();
-		if (TimeSinceCreated > SecondsBeforeBreaking && !bHasBroken)
+		// Cek waktu lepas untuk setiap titik secara individual
+		for (FVerletPoint& Point : Points)
 		{
-			SetAllPinned(false);
-			bHasBroken = true;
+			if (Point.bIsPinned)
+			{
+				Point.PinnedTime += DeltaTime;
+				if (Point.PinnedTime > SecondsBeforeBreaking)
+				{
+					Point.bIsPinned = false; // Lepas pin hanya untuk titik ini
+				}
+			}
 		}
-
 		const int32 Substeps = 10;
 		float SubDeltaTime = DeltaTime / Substeps;
 		for (int32 i = 0; i < Substeps; i++)
