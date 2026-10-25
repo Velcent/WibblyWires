@@ -176,10 +176,11 @@ struct FVerletChain
 		static const float MaxDeltaTime = 1.0f / 30.f;
 		DeltaTime = FMath::Min(MaxDeltaTime, DeltaTime);
 
-        if (bHasBroken)
-        {
-            ShrinkSticks(DeltaTime);
-        }
+		// Dinonaktifkan supaya chain tidak menyusut saat jatuh
+		// if (bHasBroken)
+		// {
+		// 	ShrinkSticks(DeltaTime);
+		// }
 
 		float TimeSinceCreated = GetSecondsSinceCreated();
 		if (TimeSinceCreated > SecondsBeforeBreaking && !bHasBroken)

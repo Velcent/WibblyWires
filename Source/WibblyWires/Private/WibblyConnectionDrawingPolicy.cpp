@@ -236,22 +236,63 @@ void FWibblyConnectionDrawingPolicy::Draw(TMap<TSharedRef<SWidget>, FArrangedWid
     static const float MaxDeltaTime = 1.f / 30.f;
     const float DeltaTime = FMath::Min(FSlateApplication::Get().GetDeltaTime(), MaxDeltaTime);
 
-    // 4. Ubah wire yang dihapus menjadi simulasi Verlet (tali jatuh)
+    // 4. Buat Verlet chain dari wire yang dihapus — TERPOTONG JADI 2 DI CURSOR
     for (const FWireId& WireId : DeletedWires)
     {
         const FWireState& WireState = GraphState.Wires[WireId];
-        if (WireState.SampledPoints.Num() > 0)
+        if (WireState.SampledPoints.Num() >= 2)
         {
-            FVerletChain Chain(WireState.Color, 3.0f);
-            for (const FVector2f& Point : WireState.SampledPoints)
+            // Cari index titik terdekat dengan posisi cursor
+            int32 SplitIndex = 0;
+            float ClosestDistSq = FLT_MAX;
+            for (int32 i = 0; i < WireState.SampledPoints.Num(); ++i)
             {
-                Chain.AddToChain(Point, false);
+                float DistSq = FVector2f::DistSquared(WireState.SampledPoints[i], AbsoluteMousePosition);
+                if (DistSq < ClosestDistSq)
+                {
+                    ClosestDistSq = DistSq;
+                    SplitIndex = i;
+                }
             }
-            // Set putus dan biarkan jatuh
-            Chain.SetAllPinned(false);
-            Chain.bHasBroken = true;
-            
-            GraphState.VerletWires.AddChain(MoveTemp(Chain));
+
+            // Clamp supaya kedua potongan tetap punya minimal 2 titik
+            SplitIndex = FMath::Clamp(SplitIndex, 1, WireState.SampledPoints.Num() - 2);
+
+            // Helper untuk membuat chain dari rentang titik tertentu
+            // bReverse = true  -> titik ditambahkan dari EndIdx mundur ke StartIdx
+            auto CreateChainFromRange = [&](int32 StartIdx, int32 EndIdx, bool bReverse)
+            {
+                if (EndIdx - StartIdx < 1) return; // butuh minimal 2 titik
+                FVerletChain Chain(WireState.Color, 3.0f);
+
+                // Kumpulkan index sesuai arah
+                TArray<int32> Indices;
+                if (bReverse)
+                {
+                    for (int32 i = EndIdx; i >= StartIdx; --i) Indices.Add(i);
+                }
+                else
+                {
+                    for (int32 i = StartIdx; i <= EndIdx; ++i) Indices.Add(i);
+                }
+
+                for (int32 k = 0; k < Indices.Num(); ++k)
+                {
+                    // Index 0 adalah ujung di PIN -> kita PIN supaya menggantung,
+                    // bukan jatuh bebas. Sisanya bebas.
+                    bool bIsPin = (k == 0);
+                    Chain.AddToChain(WireState.SampledPoints[Indices[k]], bIsPin);
+                }
+
+                // JANGAN langsung SetAllPinned(false) / bHasBroken = true.
+                // Biarkan menggantung dulu; nanti lepas sendiri setelah SecondsBeforeBreaking.
+                GraphState.VerletWires.AddChain(MoveTemp(Chain));
+            };
+
+            // Potongan kiri: node awal di index 0 -> menggantung di node awal
+            CreateChainFromRange(0, SplitIndex, false);
+            // Potongan kanan: dibalik agar node akhir di index 0 -> menggantung di node akhir
+            CreateChainFromRange(SplitIndex, WireState.SampledPoints.Num() - 1, true);
         }
         GraphState.Wires.Remove(WireId);
     }
