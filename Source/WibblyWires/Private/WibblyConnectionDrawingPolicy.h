@@ -67,6 +67,8 @@ struct FWireState
 	FVector2f LastStartPoint;
 	FVector2f LastEndPoint;
 	FLinearColor Color;
+	// Simpan titik sampel kurva bezier untuk dipakai saat wire dihapus
+    TArray<FVector2f> SampledPoints;
 
 	FWireState() = default;
 	FWireState(FVector2f StartPoint, FVector2f EndPoint, float SpringStiffness, float SpringDampeningRatio, float InDesiredSlackMultiplier);
@@ -81,6 +83,10 @@ struct FGraphState
 {
 	TMap<FWireId, FWireState> Wires;
 	FVerletState VerletWires;
+
+	// Tambahkan pelacakan wire yang aktif pada frame ini
+    TSet<FWireId> ActiveWires;
+    uint64 LastActiveFrame = 0;
 };
 
 /**
@@ -89,6 +95,7 @@ struct FGraphState
 class FWibblyConnectionDrawingPolicy : public FKismetConnectionDrawingPolicy
 {
 public:
+	FWibblyConnectionDrawingPolicy(int32 InBackLayerID, int32 InFrontLayerID, float InZoomFactor, const FSlateRect& InClippingRect, FSlateWindowElementList& InDrawElements, UEdGraph* InGraphObj);
 
 	struct Factory : public FGraphPanelPinConnectionFactory
 	{
@@ -107,9 +114,14 @@ public:
 		// ~FGraphPanelPinConnectionFactory
 	};
 
-	FWibblyConnectionDrawingPolicy(int32 InBackLayerID, int32 InFrontLayerID, float InZoomFactor, const FSlateRect& InClippingRect, FSlateWindowElementList& InDrawElements, UEdGraph* InGraphObj);
+	// Cache variabel yang sebelumnya private di base class
+    int32 CachedFrontLayerID;
+    float CachedZoomFactor;
 
 	virtual void DrawConnection(int32 LayerId, const FVector2f& Start, const FVector2f& End, const FConnectionParams& Params) override;
+
+	// Override fungsi Draw untuk menangani logika penghapusan
+    virtual void Draw(TMap<TSharedRef<SWidget>, FArrangedWidget>& InPinGeometries, FArrangedChildren& InArrangedNodes) override;
 
 private:
 

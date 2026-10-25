@@ -176,6 +176,11 @@ struct FVerletChain
 		static const float MaxDeltaTime = 1.0f / 30.f;
 		DeltaTime = FMath::Min(MaxDeltaTime, DeltaTime);
 
+        if (bHasBroken)
+        {
+            ShrinkSticks(DeltaTime);
+        }
+
 		float TimeSinceCreated = GetSecondsSinceCreated();
 		if (TimeSinceCreated > SecondsBeforeBreaking && !bHasBroken)
 		{
@@ -270,6 +275,16 @@ private:
 class FVerletState
 {
 public:
+    void AddChain(FVerletChain&& Chain)
+    {
+        VerletChains.Add(MoveTemp(Chain));
+    }
+	
+	bool HasActiveChains() const
+    {
+        return VerletChains.Num() > 0;
+    }
+
 	void TranslateVerletChains(FVectorType Translation)
 	{
 		for (FVerletChain& Chain : VerletChains)
@@ -286,8 +301,13 @@ public:
 		}
 
 		// Delete any chains that are entirely below the bottom of the screen
-		VerletChains.RemoveAllSwap([](const FVerletChain& Chain)
+		VerletChains.RemoveAllSwap([&](const FVerletChain& Chain)
 		{
+            if (Chain.bHasFullyShrunk)
+            {
+                return true;
+            }
+
 			if (Chain.GetSecondsSinceCreated() > 30.f)
 			{
 				return true;
@@ -303,7 +323,7 @@ public:
 		});
 	}
 
-	void RenderVerletChains(const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, float ThicknessScale)
+    void RenderVerletChains(FSlateWindowElementList& OutDrawElements, int32 LayerId, float ZoomFactor)
 	{
 		int32 MaxPointCount = 0;
 
@@ -336,7 +356,7 @@ public:
 				ESlateDrawEffect::NoPixelSnapping,
 				Chain.LineColor.CopyWithNewOpacity(Opacity),
 				true, // bAntiAlias
-				Chain.LineThickness * ThicknessScale);
+				Chain.LineThickness * ZoomFactor);
 		}
 	}
 

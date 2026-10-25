@@ -210,6 +210,67 @@ FWibblyConnectionDrawingPolicy::FWibblyConnectionDrawingPolicy(int32 InBackLayer
 	, GraphObj(InGraphObj)
 	, GraphState(GraphStates.FindOrAdd(InGraphObj->GraphGuid))
 {
+	// Simpan nilai Layer ID dan Zoom untuk digunakan nanti
+    CachedFrontLayerID = InFrontLayerID;
+    CachedZoomFactor = InZoomFactor;
+}
+
+void FWibblyConnectionDrawingPolicy::Draw(TMap<TSharedRef<SWidget>, FArrangedWidget>& InPinGeometries, FArrangedChildren& InArrangedNodes)
+{
+    // 1. Reset status aktif setiap siklus menggambar (menggantikan GetFrameCounter)
+    GraphState.ActiveWires.Reset();
+
+    // 2. Panggil fungsi bawaan engine untuk menggambar wire normal
+    FKismetConnectionDrawingPolicy::Draw(InPinGeometries, InArrangedNodes);
+
+    // 3. Identifikasi wire yang dihapus (ada di Wires tapi tidak dipanggil di frame ini)
+    TArray<FWireId> DeletedWires;
+    for (const auto& Pair : GraphState.Wires)
+    {
+        if (!GraphState.ActiveWires.Contains(Pair.Key))
+        {
+            DeletedWires.Add(Pair.Key);
+        }
+    }
+
+    static const float MaxDeltaTime = 1.f / 30.f;
+    const float DeltaTime = FMath::Min(FSlateApplication::Get().GetDeltaTime(), MaxDeltaTime);
+
+    // 4. Ubah wire yang dihapus menjadi simulasi Verlet (tali jatuh)
+    for (const FWireId& WireId : DeletedWires)
+    {
+        const FWireState& WireState = GraphState.Wires[WireId];
+        if (WireState.SampledPoints.Num() > 0)
+        {
+            FVerletChain Chain(WireState.Color, 3.0f);
+            for (const FVector2f& Point : WireState.SampledPoints)
+            {
+                Chain.AddToChain(Point, false);
+            }
+            // Set putus dan biarkan jatuh
+            Chain.SetAllPinned(false);
+            Chain.bHasBroken = true;
+            
+            GraphState.VerletWires.AddChain(MoveTemp(Chain));
+        }
+        GraphState.Wires.Remove(WireId);
+    }
+
+    // 5. Update simulasi fisika
+    GraphState.VerletWires.UpdateVerletChains(DeltaTime);
+
+    // 6. Paksa viewport untuk redraw jika ada animasi tali yang jatuh
+    if (GraphState.VerletWires.HasActiveChains())
+    {
+        TSharedPtr<SWindow> ActiveWindow = FSlateApplication::Get().GetActiveTopLevelWindow();
+        if (ActiveWindow.IsValid())
+        {
+            ActiveWindow->Invalidate(EInvalidateWidget::Paint);
+        }
+    }
+
+    // 7. Gambar simulasi tali yang putus
+    GraphState.VerletWires.RenderVerletChains(DrawElementsList, CachedFrontLayerID, CachedZoomFactor);
 }
 
 void FWibblyConnectionDrawingPolicy::DrawConnection(int32 LayerId, const FVector2f& Start, const FVector2f& End, const FConnectionParams& Params)
@@ -223,6 +284,7 @@ void FWibblyConnectionDrawingPolicy::DrawConnection(int32 LayerId, const FVector
 	float WireThickness = Params.WireThickness * ThicknessMultiplier * FSlateApplication::Get().GetApplicationScale() * ZoomFactor;
 
     const FWireId WireId(Params.AssociatedPin1, Params.AssociatedPin2);
+	GraphState.ActiveWires.Add(WireId); // Tandai wire sebagai aktif pada frame ini
     FWireState* WireState = GraphState.Wires.Find(WireId);
 
 	// Create a new wire if needed
@@ -274,6 +336,16 @@ void FWibblyConnectionDrawingPolicy::DrawConnection(int32 LayerId, const FVector
 	// Magic number to get more of a bend
 	const FVector2f P0Tangent = (CenterPoint - P0) * 1.3f;
 	const FVector2f P1Tangent = (P1 - CenterPoint) * 1.3f;
+
+    // Setelah menghitung CenterPoint, P0Tangent, P1Tangent, tambahkan sampling:
+    WireState->SampledPoints.Reset();
+    const int32 NumSegments = 20; // Banyaknya segmen tali
+    for (int32 i = 0; i <= NumSegments; ++i)
+    {
+        float Alpha = (float)i / (float)NumSegments;
+        FVector2f Point = FMath::CubicInterp(P0, P0Tangent, P1, P1Tangent, Alpha);
+        WireState->SampledPoints.Add(Point);
+    }
 
 	if (Settings->bTreatSplinesLikePins)
 	{
