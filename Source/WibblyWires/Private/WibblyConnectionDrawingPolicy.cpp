@@ -299,7 +299,7 @@ void FWibblyConnectionDrawingPolicy::DrawConnection(int32 LayerId, const FVector
 			Bounds += FVector2f(P1);
 			Bounds += FVector2f(P1 - MaximumTangentContribution * P1Tangent);
 
-			bCloseToSpline = Bounds.ComputeSquaredDistanceToPoint(LocalMousePosition) < QueryDistanceForCloseSquared;
+			bCloseToSpline = Bounds.ComputeSquaredDistanceToPoint(AbsoluteMousePosition) < QueryDistanceForCloseSquared;
 
 			// Draw the bounding box for debugging
 #if 0
@@ -335,8 +335,8 @@ void FWibblyConnectionDrawingPolicy::DrawConnection(int32 LayerId, const FVector
 			{
 				const FVector2f Point2 = FMath::CubicInterp(P0, P0Tangent, P1, P1Tangent, TestAlpha + StepInterval);
 
-				const FVector2f ClosestPointToSegment = FMath::ClosestPointOnSegment2D(LocalMousePosition, Point1, Point2);
-				const float DistanceSquared = (LocalMousePosition - ClosestPointToSegment).SizeSquared();
+				const FVector2f ClosestPointToSegment = FMath::ClosestPointOnSegment2D(AbsoluteMousePosition, Point1, Point2);
+				const float DistanceSquared = (AbsoluteMousePosition - ClosestPointToSegment).SizeSquared();
 
 				if (DistanceSquared < ClosestDistanceSquared)
 				{
