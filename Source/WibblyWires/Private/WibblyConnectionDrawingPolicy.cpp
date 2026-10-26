@@ -8,6 +8,11 @@
 #include "WibblySettings.h"
 #include "Engine/SpringInterpolator.h"
 #include "K2Node_Knot.h"
+#include "ScopedTransaction.h"
+#include "EdGraph/EdGraphSchema.h"
+#include "HAL/PlatformTime.h"
+#include "Widgets/SWindow.h"
+#include "InputCoreTypes.h"
 
 // For each graph guid, store a map from wire id to wire state
 static TMap<FGuid, FGraphState> GraphStates;
@@ -284,6 +289,134 @@ static bool ArePinsConnectedThroughReroutes(UEdGraphPin* StartPin, UEdGraphPin* 
 	return false;
 }
 
+// ---------- Helper geometri ----------
+static float Cross2D(const FVector2f& A, const FVector2f& B) { return A.X * B.Y - A.Y * B.X; }
+
+static bool SegSegIntersect(const FVector2f& P1, const FVector2f& P2, const FVector2f& P3, const FVector2f& P4)
+{
+	const FVector2f D1 = P2 - P1;
+	const FVector2f D2 = P4 - P3;
+	const float Den = Cross2D(D1, D2);
+	if (FMath::Abs(Den) < 1e-8f) return false;
+	const FVector2f D3 = P3 - P1;
+	const float T = Cross2D(D3, D2) / Den;
+	const float U = Cross2D(D3, D1) / Den;
+	return (T >= 0.f && T <= 1.f && U >= 0.f && U <= 1.f);
+}
+
+static bool SegmentIntersectsPolyline(const FVector2f& A, const FVector2f& B, const TArray<FVector2f>& P)
+{
+	for (int32 i = 0; i + 1 < P.Num(); ++i)
+	{
+		if (SegSegIntersect(A, B, P[i], P[i + 1])) return true;
+	}
+	return false;
+}
+
+// ---------- FWibblyCutRegistry ----------
+FWibblyCutRegistry& FWibblyCutRegistry::Get()
+{
+	static FWibblyCutRegistry Instance;
+	return Instance;
+}
+
+void FWibblyCutRegistry::RequestStart()
+{
+	StartRequestTime = FPlatformTime::Seconds();
+	// Paksa panel repaint agar Draw() berjalan dan bisa mengambil titik mulai
+	if (FSlateApplication::IsInitialized())
+	{
+		TSharedPtr<SWindow> Window = FSlateApplication::Get().GetActiveTopLevelWindow();
+		if (Window.IsValid()) { Window->Invalidate(EInvalidateWidget::Paint); }
+	}
+}
+
+bool FWibblyCutRegistry::ConsumeStartRequest()
+{
+	if (StartRequestTime < 0.0) return false;
+	const double Age = FPlatformTime::Seconds() - StartRequestTime;
+	StartRequestTime = -1.0;
+	return (Age < 0.1);
+}
+
+void FWibblyCutRegistry::BeginPublish(UEdGraph* InGraph)
+{
+	Graph = InGraph;
+	Wires.Reset();
+}
+
+void FWibblyCutRegistry::AddWire(const FWireId& InId, const TArray<FVector2f>& InPoints)
+{
+	FWireGeom& G = Wires.AddDefaulted_GetRef();
+	G.Id = InId;
+	G.Points = InPoints;
+}
+
+void FWibblyCutRegistry::EndPublish(const FVector2f& InGraphMousePos) { }
+
+void FWibblyCutRegistry::AccumulateIntersections(const FVector2f& InGraphMousePos)
+{
+	for (const FWireGeom& G : Wires)
+	{
+		if (SegmentIntersectsPolyline(CutStart, InGraphMousePos, G.Points))
+		{
+			Pending.Add(G.Id);
+		}
+	}
+}
+
+void FWibblyCutRegistry::FinishCut()
+{
+	bCutting = false;
+	if (Graph == nullptr || Pending.Num() == 0) { Pending.Reset(); return; }
+
+	FScopedTransaction Transaction(NSLOCTEXT("WibblyWires", "CutWibblyWires", "Cut Wires"));
+	Graph->Modify();
+	for (const FWireId& Id : Pending)
+	{
+		UEdGraphPin* A = Id.GetStartPin(Graph);
+		UEdGraphPin* B = Id.GetEndPin(Graph);
+		if (A && B)
+		{
+			A->Modify();
+			B->Modify();
+			Graph->GetSchema()->BreakSinglePinLink(A, B);
+		}
+	}
+	Graph->NotifyGraphChanged(); // wire hilang -> animasi potong Verlet otomatis jalan
+	Pending.Reset();
+}
+
+void FWibblyCutRegistry::CancelCut()
+{
+	bCutting = false;
+	Pending.Reset();
+}
+
+// ---------- FWibblyCutInputProcessor ----------
+bool FWibblyCutInputProcessor::HandleMouseButtonDownEvent(FSlateApplication& SlateApp, const FPointerEvent& InEvent)
+{
+	if (InEvent.GetEffectingButton() == EKeys::LeftMouseButton && InEvent.IsAltDown())
+	{
+		FWibblyCutRegistry::Get().RequestStart();
+	}
+	return false; // jangan ditelan: garis putus-putus bawaan engine tetap tampil
+}
+
+bool FWibblyCutInputProcessor::HandleMouseButtonUpEvent(FSlateApplication& SlateApp, const FPointerEvent& InEvent)
+{
+	if (InEvent.GetEffectingButton() == EKeys::LeftMouseButton)
+	{
+		FWibblyCutRegistry& Reg = FWibblyCutRegistry::Get();
+		if (Reg.bCutting)
+		{
+			if (InEvent.IsAltDown()) { Reg.FinishCut(); }
+			else { Reg.CancelCut(); }
+		}
+	}
+	return false;
+}
+
 void FWibblyConnectionDrawingPolicy::Draw(TMap<TSharedRef<SWidget>, FArrangedWidget>& InPinGeometries, FArrangedChildren& InArrangedNodes)
 {
 	// 1. Reset tracking per-frame (DeltaVotes JUGA wajib di-reset, dulu menumpuk selamanya)
@@ -363,7 +496,7 @@ void FWibblyConnectionDrawingPolicy::Draw(TMap<TSharedRef<SWidget>, FArrangedWid
 			ObsoleteWires.Add(Pair.Key); // pin/node lenyap -> buang state, tanpa animasi
 			continue;
 		}
-		
+
 		// Masih terhubung langsung -> hanya di-cull (off-screen / node collapse)
 		if (StartPin->LinkedTo.Contains(EndPin))
 		{
@@ -475,6 +608,34 @@ void FWibblyConnectionDrawingPolicy::Draw(TMap<TSharedRef<SWidget>, FArrangedWid
 
     // 7. Gambar simulasi tali yang putus
     GraphState.VerletWires.RenderVerletChains(DrawElementsList, CachedFrontLayerID, CachedZoomFactor);
+
+	// ===== Integrasi alat potong Alt+Drag =====
+	{
+		FWibblyCutRegistry& Reg = FWibblyCutRegistry::Get();
+
+		if (Reg.ConsumeStartRequest())
+		{
+			Reg.bCutting = true;
+			Reg.CutStart = AbsoluteMousePosition;
+			Reg.Pending.Reset();
+		}
+
+		if (Reg.bCutting)
+		{
+			Reg.AccumulateIntersections(AbsoluteMousePosition);
+		}
+
+		// Publikasikan geometri wire frame ini untuk uji perpotongan
+		Reg.BeginPublish(GraphObj);
+		for (const auto& Pair : GraphState.Wires)
+		{
+			if (!Pair.Key.IsPreviewConnector() && Pair.Value.SampledPoints.Num() >= 2)
+			{
+				Reg.AddWire(Pair.Key, Pair.Value.SampledPoints);
+			}
+		}
+		Reg.EndPublish(AbsoluteMousePosition);
+	}
 }
 
 void FWibblyConnectionDrawingPolicy::DrawConnection(int32 LayerId, const FVector2f& Start, const FVector2f& End, const FConnectionParams& Params)

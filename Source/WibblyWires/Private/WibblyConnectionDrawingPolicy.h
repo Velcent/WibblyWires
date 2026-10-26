@@ -8,9 +8,18 @@
 #include "Verlet.h"
 #include "EdGraphUtilities.h"
 #include "Engine/SpringInterpolator.h"
+#include "Framework/Application/IInputProcessor.h"
+#include "Input/Events.h"
 
 struct FWireId
 {
+	FWireId()
+		: StartPin(nullptr)
+		, EndPin(nullptr)
+		, Hash(0)
+	{
+	}
+
 	FWireId(UEdGraphPin* InStartPin, UEdGraphPin* InEndPin)
 	: StartPin(InStartPin)
 	, EndPin(InEndPin)
@@ -163,4 +172,54 @@ private:
 
 	UEdGraph* GraphObj;
 	FGraphState& GraphState;
+};
+
+// ===== Registry geometri wire untuk alat potong Alt+Drag =====
+struct FWibblyCutRegistry
+{
+	struct FWireGeom
+	{
+		FWireId Id;
+		TArray<FVector2f> Points;
+	};
+
+	static FWibblyCutRegistry& Get();
+
+	void RequestStart();
+	bool ConsumeStartRequest();
+	void BeginPublish(UEdGraph* InGraph);
+	void AddWire(const FWireId& InId, const TArray<FVector2f>& InPoints);
+	void EndPublish(const FVector2f& InGraphMousePos);
+	void AccumulateIntersections(const FVector2f& InGraphMousePos);
+	void FinishCut();
+	void CancelCut();
+
+	TArray<FWireGeom> Wires;
+	UEdGraph* Graph = nullptr;
+	double StartRequestTime = -1.0;
+	bool bCutting = false;
+	FVector2f CutStart = FVector2f::ZeroVector;
+	TSet<FWireId> Pending;
+};
+
+// ===== Input processor: menangkap Alt+LMB drag =====
+class FWibblyCutInputProcessor : public IInputProcessor
+{
+public:
+	// UE 5.8: signature Tick yang baru (DeltaTime, SlateApp, Cursor)
+	virtual void Tick(const float DeltaTime, FSlateApplication& SlateApp, TSharedRef<ICursor> Cursor) override {}
+
+	// Stub wajib / pelengkap (tidak menelan event)
+	virtual bool HandleKeyDownEvent(FSlateApplication& SlateApp, const FKeyEvent& InKeyEvent) override { return false; }
+	virtual bool HandleKeyUpEvent(FSlateApplication& SlateApp, const FKeyEvent& InKeyEvent) override { return false; }
+	virtual bool HandleAnalogInputEvent(FSlateApplication& SlateApp, const FAnalogInputEvent& InAnalogInputEvent) override { return false; }
+	virtual bool HandleMouseMoveEvent(FSlateApplication& SlateApp, const FPointerEvent& MouseEvent) override { return false; }
+	virtual bool HandleMotionDetectedEvent(FSlateApplication& SlateApp, const FMotionEvent& MotionEvent) override { return false; }
+
+	// CATATAN: HandleMouseWheelOrGestureEvent TIDAK perlu di-override lagi di UE 5.8
+	// (sudah ada implementasi default di base class yang return false) -> barisnya DIHAPUS.
+
+	// Dua method inti fitur cut Alt+Drag (implementasi tetap di .cpp)
+	virtual bool HandleMouseButtonDownEvent(FSlateApplication& SlateApp, const FPointerEvent& InEvent) override;
+	virtual bool HandleMouseButtonUpEvent(FSlateApplication& SlateApp, const FPointerEvent& InEvent) override;
 };

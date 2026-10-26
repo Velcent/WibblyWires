@@ -23,6 +23,7 @@ public class WibblyWires : ModuleRules
 			"Engine",
 			"Slate",
 			"SlateCore",
+			"InputCore",
 			"GraphEditor",
 			"UnrealEd",
 			"BlueprintGraph",
