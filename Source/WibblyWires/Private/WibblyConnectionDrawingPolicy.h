@@ -117,6 +117,8 @@ public:
 	// Cache variabel yang sebelumnya private di base class
     int32 CachedFrontLayerID;
     float CachedZoomFactor;
+    // Voting delta pergerakan wire per frame (untuk deteksi pan/scroll view)
+    TMap<FIntPoint, int32> DeltaVotes;
 
 	virtual void DrawConnection(int32 LayerId, const FVector2f& Start, const FVector2f& End, const FConnectionParams& Params) override;
 

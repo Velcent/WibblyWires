@@ -222,7 +222,33 @@ void FWibblyConnectionDrawingPolicy::Draw(TMap<TSharedRef<SWidget>, FArrangedWid
 
     // 2. Panggil fungsi bawaan engine untuk menggambar wire normal
     FKismetConnectionDrawingPolicy::Draw(InPinGeometries, InArrangedNodes);
+    // 2.5. Translate potongan wire yang ter-cut agar mengikuti pan/scroll view.
+    //      Ambil delta mayoritas dari voting: saat pan SEMUA wire bergerak seragam,
+    //      saat node di-drag hanya sebagian wire bergerak (mayoritas tetap 0).
+    {
+        FIntPoint BestKey(0, 0);
+        int32 BestVotes = 1; // butuh minimal 2 suara biar tidak salah tebak
+        for (const auto& Vote : DeltaVotes)
+        {
+            if (Vote.Value > BestVotes)
+            {
+                BestVotes = Vote.Value;
+                BestKey = Vote.Key;
+            }
+        }
 
+        // Seri dengan delta 0 -> anggap tidak ada pan (mis. lagi drag node)
+        const int32 ZeroVotes = DeltaVotes.FindRef(FIntPoint(0, 0));
+        if (ZeroVotes >= BestVotes)
+        {
+            BestKey = FIntPoint(0, 0);
+        }
+
+        if (BestKey.X != 0 || BestKey.Y != 0)
+        {
+            GraphState.VerletWires.TranslateVerletChains(FVector2f((float)BestKey.X, (float)BestKey.Y));
+        }
+    }
     // 3. Identifikasi wire yang dihapus (ada di Wires tapi tidak dipanggil di frame ini)
     TArray<FWireId> DeletedWires;
     for (const auto& Pair : GraphState.Wires)
@@ -232,18 +258,27 @@ void FWibblyConnectionDrawingPolicy::Draw(TMap<TSharedRef<SWidget>, FArrangedWid
             continue; // masih digambar frame ini -> wire masih hidup
         }
 
-		UEdGraphPin* StartPin = const_cast<UEdGraphPin*>(Pair.Key.StartPin);
-		UEdGraphPin* EndPin   = const_cast<UEdGraphPin*>(Pair.Key.EndPin);
+        UEdGraphPin* StartPin = const_cast<UEdGraphPin*>(Pair.Key.StartPin);
+        UEdGraphPin* EndPin   = const_cast<UEdGraphPin*>(Pair.Key.EndPin);
 
-        // Pin masih valid dan masih saling terhubung => wire hanya sedang tidak terlihat
-        // (di-cull / node di-collapse / di luar view). JANGAN spawn animasi cut.
-	const bool bLinkStillExists = (StartPin != nullptr) && (EndPin != nullptr) && StartPin->LinkedTo.Contains(EndPin);
+        // PREVIEW CONNECTOR (wire yang sedang di-drag dari pin, salah satu pin nullptr).
+        // DrawConnection-nya dipanggil dari paint widget pin, sehingga di frame tertentu
+        // (menu konteks terbuka / widget tidak di-repaint) ia tidak dipanggil dan state-nya
+        // dianggap "deleted" -> spawn Verlet chain tiap frame (bug kipas benang).
+        // Solusi: preview connector TIDAK PERNAH memicu animasi cut.
+        if (StartPin == nullptr || EndPin == nullptr)
+        {
+            continue;
+        }
+
+        // Wire asli, tapi pin masih saling terhubung => hanya sedang di-cull (off-screen)
+        const bool bLinkStillExists = StartPin->LinkedTo.Contains(EndPin);
         if (bLinkStillExists)
         {
             continue;
         }
 
-        // Sampai sini: koneksi benar-benar putus / node dihapus / preview connector dilepas
+        // Wire asli yang koneksinya benar-benar putus / node dihapus -> animasi cut
         DeletedWires.Add(Pair.Key);
     }
 
@@ -341,31 +376,32 @@ void FWibblyConnectionDrawingPolicy::DrawConnection(int32 LayerId, const FVector
     const FWireId WireId(Params.AssociatedPin1, Params.AssociatedPin2);
 	GraphState.ActiveWires.Add(WireId); // Tandai wire sebagai aktif pada frame ini
     FWireState* WireState = GraphState.Wires.Find(WireId);
+	const bool bWireExisted = (WireState != nullptr);
 
 	// Create a new wire if needed
     if (!WireState)
     {
-    	bool bIsPreviewConnector = Params.AssociatedPin1 == nullptr || Params.AssociatedPin2 == nullptr;
-    	float StiffnessVariance = FMath::FRandRange(0.3f, 1.5f);
-    	float DampeningVariance = FMath::FRandRange(0.7f, 1.2f);
-    	float SlackMultiplier = 1.3f + FMath::FRandRange(0.f, 0.3f);
-    	float Stiffness = DefaultStiffness * StiffnessVariance + (bIsPreviewConnector ? 0.3f : 0.f);
-    	float DampeningRatio = FMath::Clamp(DefaultDampeningRatio * DampeningVariance, 0.3f, 0.9f);
-    	FWireState NewWireState(Start, End, Stiffness, DampeningRatio, SlackMultiplier);
-    	NewWireState.Color = Params.WireColor;
+		bool bIsPreviewConnector = Params.AssociatedPin1 == nullptr || Params.AssociatedPin2 == nullptr;
+		float StiffnessVariance = FMath::FRandRange(0.3f, 1.5f);
+		float DampeningVariance = FMath::FRandRange(0.7f, 1.2f);
+		float SlackMultiplier = 1.3f + FMath::FRandRange(0.f, 0.3f);
+		float Stiffness = DefaultStiffness * StiffnessVariance + (bIsPreviewConnector ? 0.3f : 0.f);
+		float DampeningRatio = FMath::Clamp(DefaultDampeningRatio * DampeningVariance, 0.3f, 0.9f);
+		FWireState NewWireState(Start, End, Stiffness, DampeningRatio, SlackMultiplier);
+		NewWireState.Color = Params.WireColor;
 
-    	for (const auto& ExistingState : GraphState.Wires)
-    	{
-    		if (!ExistingState.Key.IsPreviewConnector())
-    		{
-    			continue;
-    		}
+		for (const auto& ExistingState : GraphState.Wires)
+		{
+			if (!ExistingState.Key.IsPreviewConnector())
+			{
+				continue;
+			}
 
-    		const UEdGraphPin* ConnectedPin = ExistingState.Key.GetConnectedPin();
-    		if (ConnectedPin != Params.AssociatedPin1 && ConnectedPin != Params.AssociatedPin2)
-    		{
-    			continue;
-    		}
+			const UEdGraphPin* ConnectedPin = ExistingState.Key.GetConnectedPin();
+			if (ConnectedPin != Params.AssociatedPin1 && ConnectedPin != Params.AssociatedPin2)
+			{
+				continue;
+			}
 
     		const float DistThresholdSqr = 30.f * 30.f;
 			if (FVector2f::DistSquared(ExistingState.Value.LastStartPoint, Start) < DistThresholdSqr && FVector2f::DistSquared(ExistingState.Value.LastEndPoint, End) < DistThresholdSqr)
@@ -373,11 +409,17 @@ void FWibblyConnectionDrawingPolicy::DrawConnection(int32 LayerId, const FVector
 				// Inherit our initial state from this existing thing, since it was probably a preview connector that got connected
 				NewWireState = ExistingState.Value;
 			}
-    	}
+		}
 
-    	WireState = &GraphState.Wires.Add(WireId, MoveTemp(NewWireState));
+		WireState = &GraphState.Wires.Add(WireId, MoveTemp(NewWireState));
     }
-
+    // VOTING DELTA: sebelum Update() menimpa LastStartPoint, catat seberapa jauh
+    // wire ini berpindah sejak frame lalu. Saat pan, semua wire pindah seragam.
+    if (bWireExisted && Params.AssociatedPin1 != nullptr && Params.AssociatedPin2 != nullptr)
+    {
+        const FVector2f Delta = Start - WireState->LastStartPoint;
+        DeltaVotes.FindOrAdd(FIntPoint(FMath::RoundToInt(Delta.X), FMath::RoundToInt(Delta.Y))) += 1;
+    }
 	// Clamp our tick rate to 30fps to avoid editor hitches hiding our animations, we'd rather they just pause
 	static const float MaxDeltaTime = 1.f / 30.f;
 	const float DeltaTime = FMath::Min(FSlateApplication::Get().GetDeltaTime(), MaxDeltaTime);
