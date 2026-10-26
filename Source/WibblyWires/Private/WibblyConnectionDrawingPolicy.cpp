@@ -7,7 +7,7 @@
 #include "Verlet.h"
 #include "WibblySettings.h"
 #include "Engine/SpringInterpolator.h"
-#include "EdGraph/EdGraphNode_Reroute.h"
+#include "K2Node_Knot.h"
 
 // For each graph guid, store a map from wire id to wire state
 static TMap<FGuid, FGraphState> GraphStates;
@@ -249,20 +249,21 @@ static bool ArePinsConnectedThroughReroutes(UEdGraphPin* StartPin, UEdGraphPin* 
 
 	while (PinStack.Num() > 0)
 	{
-		const UEdGraphPin* CurrentPin = PinStack.Pop(false);
+		const UEdGraphPin* CurrentPin = PinStack.Pop(EAllowShrinking::No);
 		if (CurrentPin == nullptr || CurrentPin == EndPin)
 		{
 			return CurrentPin == EndPin;
 		}
 
 		const UEdGraphNode* OwnerNode = CurrentPin->GetOwningNode();
-		if (OwnerNode == nullptr || !VisitedNodes.Add(OwnerNode))
+		if (OwnerNode == nullptr || VisitedNodes.Contains(OwnerNode))
 		{
 			continue;
 		}
+		VisitedNodes.Add(OwnerNode);
 
 		// Hanya boleh "menembus" reroute node, node lain bukan jalur split
-		if (!OwnerNode->IsA(UEdGraphNode_Reroute::StaticClass()))
+		if (!OwnerNode->IsA(UK2Node_Knot::StaticClass()))
 		{
 			continue;
 		}
@@ -323,7 +324,7 @@ void FWibblyConnectionDrawingPolicy::Draw(TMap<TSharedRef<SWidget>, FArrangedWid
     // 3. Identifikasi wire yang dihapus (ada di Wires tapi tidak dipanggil di frame ini)
 	TArray<FWireId> DeletedWires;   // -> animasi cut
 	TArray<FWireId> ObsoleteWires;  // -> buang state diam-diam, TANPA animasi
-    for (const auto& Pair : GraphState.Wires)
+	for (auto& Pair : GraphState.Wires)
     {
 		FWireState& State = Pair.Value;
 
@@ -352,17 +353,17 @@ void FWibblyConnectionDrawingPolicy::Draw(TMap<TSharedRef<SWidget>, FArrangedWid
 			continue;
 		}
 
-		// FIX BUG UNDO: jangan pernah dereference pointer pin mentah.
-		// Setelah undo / hapus node / compile, pin bisa sudah di-destroy.
-		if (!Pair.Key.StartPinWeak.IsValid() || !Pair.Key.EndPinWeak.IsValid())
+		// FIX BUG UNDO: Cari pin asli di graph menggunakan Handle. 
+		// Jika hasilnya nullptr, berarti node/pin sudah di-destroy.
+		UEdGraphPin* StartPin = Pair.Key.GetStartPin(GraphObj);
+		UEdGraphPin* EndPin   = Pair.Key.GetEndPin(GraphObj);
+
+		if (StartPin == nullptr || EndPin == nullptr)
 		{
 			ObsoleteWires.Add(Pair.Key); // pin/node lenyap -> buang state, tanpa animasi
 			continue;
 		}
-
-		UEdGraphPin* StartPin = Pair.Key.StartPinWeak.Get();
-		UEdGraphPin* EndPin   = Pair.Key.EndPinWeak.Get();
-
+		
 		// Masih terhubung langsung -> hanya di-cull (off-screen / node collapse)
 		if (StartPin->LinkedTo.Contains(EndPin))
 		{

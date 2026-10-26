@@ -16,8 +16,6 @@ struct FWireId
 	, EndPin(InEndPin)
 	, StartPinHandle(FGraphPinHandle(InStartPin))
 	, EndPinHandle(FGraphPinHandle(InEndPin))
-	, StartPinWeak(InStartPin)
-	, EndPinWeak(InEndPin)
 	{
 		uint32 StartHash = StartPin ? GetTypeHash(StartPin->PinId) : 0;
 		uint32 EndHash = EndPin ? GetTypeHash(EndPin->PinId) : 0;
@@ -54,8 +52,39 @@ public:
 	const UEdGraphPin* EndPin;
 	FGraphPinHandle StartPinHandle;
 	FGraphPinHandle EndPinHandle;
-	TWeakObjectPtr<UEdGraphPin> StartPinWeak;
-	TWeakObjectPtr<UEdGraphPin> EndPinWeak;
+
+	// Helper untuk mencari pin yang valid di dalam Graph (karena UEdGraphPin bukan UObject)
+	UEdGraphPin* GetStartPin(UEdGraph* Graph) const
+	{
+		if (!StartPinHandle.IsValid() || Graph == nullptr) return nullptr;
+		for (UEdGraphNode* Node : Graph->Nodes)
+		{
+			if (Node && Node->NodeGuid == StartPinHandle.NodeGuid)
+			{
+				for (UEdGraphPin* Pin : Node->Pins)
+				{
+					if (Pin && Pin->PinId == StartPinHandle.PinId) return Pin;
+				}
+			}
+		}
+		return nullptr;
+	}
+
+	UEdGraphPin* GetEndPin(UEdGraph* Graph) const
+	{
+		if (!EndPinHandle.IsValid() || Graph == nullptr) return nullptr;
+		for (UEdGraphNode* Node : Graph->Nodes)
+		{
+			if (Node && Node->NodeGuid == EndPinHandle.NodeGuid)
+			{
+				for (UEdGraphPin* Pin : Node->Pins)
+				{
+					if (Pin && Pin->PinId == EndPinHandle.PinId) return Pin;
+				}
+			}
+		}
+		return nullptr;
+	}
 
 private:
 	uint32 Hash;
