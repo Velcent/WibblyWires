@@ -7,6 +7,7 @@
 #include "Verlet.h"
 #include "WibblySettings.h"
 #include "Engine/SpringInterpolator.h"
+#include "EdGraph/EdGraphNode_Reroute.h"
 
 // For each graph guid, store a map from wire id to wire state
 static TMap<FGuid, FGraphState> GraphStates;
@@ -215,13 +216,82 @@ FWibblyConnectionDrawingPolicy::FWibblyConnectionDrawingPolicy(int32 InBackLayer
     CachedZoomFactor = InZoomFactor;
 }
 
+// Berapa frame berturut-turut wire harus "hilang" sebelum boleh dianggap cut.
+// Mencegah frame transien (rekonstruksi graph saat undo/redo/compile) memicu animasi.
+static constexpr int32 RequiredMissingFramesBeforeCut = 2;
+// Batas cleanup state preview connector yang sudah basi
+static constexpr int32 PreviewConnectorMaxMissingFrames = 60;
+// Cut asli terjadi satu wire per aksi. Jika lebih dari ini dalam 1 frame,
+// pasti graph sedang direstrukturisasi (undo/redo/paste/compile) -> jangan animasikan.
+static constexpr int32 MaxCutChainsPerFrame = 3;
+
+// Dua pin masih terhubung lewat satu atau lebih reroute node?
+// Double click wire = wire DIBELAH (reroute disisipkan), bukan dipotong.
+static bool ArePinsConnectedThroughReroutes(UEdGraphPin* StartPin, UEdGraphPin* EndPin)
+{
+	if (StartPin == nullptr || EndPin == nullptr)
+	{
+		return false;
+	}
+
+	if (StartPin->LinkedTo.Contains(EndPin))
+	{
+		return true;
+	}
+
+	TSet<const UEdGraphNode*> VisitedNodes;
+	TArray<const UEdGraphPin*> PinStack;
+
+	for (UEdGraphPin* LinkedPin : StartPin->LinkedTo)
+	{
+		PinStack.Add(LinkedPin);
+	}
+
+	while (PinStack.Num() > 0)
+	{
+		const UEdGraphPin* CurrentPin = PinStack.Pop(false);
+		if (CurrentPin == nullptr || CurrentPin == EndPin)
+		{
+			return CurrentPin == EndPin;
+		}
+
+		const UEdGraphNode* OwnerNode = CurrentPin->GetOwningNode();
+		if (OwnerNode == nullptr || !VisitedNodes.Add(OwnerNode))
+		{
+			continue;
+		}
+
+		// Hanya boleh "menembus" reroute node, node lain bukan jalur split
+		if (!OwnerNode->IsA(UEdGraphNode_Reroute::StaticClass()))
+		{
+			continue;
+		}
+
+		for (UEdGraphPin* ReroutePin : OwnerNode->Pins)
+		{
+			for (UEdGraphPin* NextPin : ReroutePin->LinkedTo)
+			{
+				if (NextPin == EndPin)
+				{
+					return true;
+				}
+				PinStack.Add(NextPin);
+			}
+		}
+	}
+
+	return false;
+}
+
 void FWibblyConnectionDrawingPolicy::Draw(TMap<TSharedRef<SWidget>, FArrangedWidget>& InPinGeometries, FArrangedChildren& InArrangedNodes)
 {
-    // 1. Reset status aktif setiap siklus menggambar (menggantikan GetFrameCounter)
-    GraphState.ActiveWires.Reset();
+	// 1. Reset tracking per-frame (DeltaVotes JUGA wajib di-reset, dulu menumpuk selamanya)
+	GraphState.ActiveWires.Reset();
+	DeltaVotes.Reset();
 
     // 2. Panggil fungsi bawaan engine untuk menggambar wire normal
     FKismetConnectionDrawingPolicy::Draw(InPinGeometries, InArrangedNodes);
+	
     // 2.5. Translate potongan wire yang ter-cut agar mengikuti pan/scroll view.
     //      Ambil delta mayoritas dari voting: saat pan SEMUA wire bergerak seragam,
     //      saat node di-drag hanya sebagian wire bergerak (mayoritas tetap 0).
@@ -249,39 +319,82 @@ void FWibblyConnectionDrawingPolicy::Draw(TMap<TSharedRef<SWidget>, FArrangedWid
             GraphState.VerletWires.TranslateVerletChains(FVector2f((float)BestKey.X, (float)BestKey.Y));
         }
     }
+
     // 3. Identifikasi wire yang dihapus (ada di Wires tapi tidak dipanggil di frame ini)
-    TArray<FWireId> DeletedWires;
+	TArray<FWireId> DeletedWires;   // -> animasi cut
+	TArray<FWireId> ObsoleteWires;  // -> buang state diam-diam, TANPA animasi
     for (const auto& Pair : GraphState.Wires)
     {
+		FWireState& State = Pair.Value;
+
         if (GraphState.ActiveWires.Contains(Pair.Key))
         {
+			State.MissingFrameCount = 0;
             continue; // masih digambar frame ini -> wire masih hidup
         }
 
-        UEdGraphPin* StartPin = const_cast<UEdGraphPin*>(Pair.Key.StartPin);
-        UEdGraphPin* EndPin   = const_cast<UEdGraphPin*>(Pair.Key.EndPin);
+		// Grace period: wire harus hilang beberapa frame berturut-turut.
+		// Frame transien saat undo/redo/compile tidak lagi memicu cut.
+		State.MissingFrameCount++;
+		if (State.MissingFrameCount < RequiredMissingFramesBeforeCut)
+		{
+			continue;
+		}
 
-        // PREVIEW CONNECTOR (wire yang sedang di-drag dari pin, salah satu pin nullptr).
-        // DrawConnection-nya dipanggil dari paint widget pin, sehingga di frame tertentu
-        // (menu konteks terbuka / widget tidak di-repaint) ia tidak dipanggil dan state-nya
-        // dianggap "deleted" -> spawn Verlet chain tiap frame (bug kipas benang).
-        // Solusi: preview connector TIDAK PERNAH memicu animasi cut.
-        if (StartPin == nullptr || EndPin == nullptr)
-        {
-            continue;
-        }
+		// Preview connector: tidak pernah memicu animasi cut (fix lama dipertahankan),
+		// tapi state-nya dibersihkan setelah drag selesai biar tidak bocor.
+		if (Pair.Key.IsPreviewConnector())
+		{
+			if (State.MissingFrameCount > PreviewConnectorMaxMissingFrames)
+			{
+				ObsoleteWires.Add(Pair.Key);
+			}
+			continue;
+		}
 
-        // Wire asli, tapi pin masih saling terhubung => hanya sedang di-cull (off-screen)
-        const bool bLinkStillExists = StartPin->LinkedTo.Contains(EndPin);
-        if (bLinkStillExists)
-        {
-            continue;
-        }
+		// FIX BUG UNDO: jangan pernah dereference pointer pin mentah.
+		// Setelah undo / hapus node / compile, pin bisa sudah di-destroy.
+		if (!Pair.Key.StartPinWeak.IsValid() || !Pair.Key.EndPinWeak.IsValid())
+		{
+			ObsoleteWires.Add(Pair.Key); // pin/node lenyap -> buang state, tanpa animasi
+			continue;
+		}
+
+		UEdGraphPin* StartPin = Pair.Key.StartPinWeak.Get();
+		UEdGraphPin* EndPin   = Pair.Key.EndPinWeak.Get();
+
+		// Masih terhubung langsung -> hanya di-cull (off-screen / node collapse)
+		if (StartPin->LinkedTo.Contains(EndPin))
+		{
+			continue;
+		}
+
+		// FIX BUG DOUBLE CLICK: koneksi masih hidup lewat reroute node
+		// => wire di-SPLIT, bukan di-CUT. Buang state lama tanpa animasi.
+		if (ArePinsConnectedThroughReroutes(StartPin, EndPin))
+		{
+			ObsoleteWires.Add(Pair.Key);
+			continue;
+		}
 
         // Wire asli yang koneksinya benar-benar putus / node dihapus -> animasi cut
         DeletedWires.Add(Pair.Key);
     }
 
+	// Safety valve: user cuma bisa memotong 1 wire per aksi. Kalau dalam satu frame
+	// ada banyak wire "terhapus", itu restrukturisasi graph (undo/redo/paste/compile)
+	// -> batalkan semua animasi supaya tidak terspam.
+	if (DeletedWires.Num() > MaxCutChainsPerFrame)
+	{
+		ObsoleteWires.Append(DeletedWires);
+		DeletedWires.Reset();
+	}
+
+	for (const FWireId& WireId : ObsoleteWires)
+	{
+		GraphState.Wires.Remove(WireId);
+	}
+	
     static const float MaxDeltaTime = 1.f / 30.f;
     const float DeltaTime = FMath::Min(FSlateApplication::Get().GetDeltaTime(), MaxDeltaTime);
 

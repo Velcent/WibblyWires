@@ -16,6 +16,8 @@ struct FWireId
 	, EndPin(InEndPin)
 	, StartPinHandle(FGraphPinHandle(InStartPin))
 	, EndPinHandle(FGraphPinHandle(InEndPin))
+	, StartPinWeak(InStartPin)
+	, EndPinWeak(InEndPin)
 	{
 		uint32 StartHash = StartPin ? GetTypeHash(StartPin->PinId) : 0;
 		uint32 EndHash = EndPin ? GetTypeHash(EndPin->PinId) : 0;
@@ -52,6 +54,8 @@ public:
 	const UEdGraphPin* EndPin;
 	FGraphPinHandle StartPinHandle;
 	FGraphPinHandle EndPinHandle;
+	TWeakObjectPtr<UEdGraphPin> StartPinWeak;
+	TWeakObjectPtr<UEdGraphPin> EndPinWeak;
 
 private:
 	uint32 Hash;
@@ -69,6 +73,7 @@ struct FWireState
 	FLinearColor Color;
 	// Simpan titik sampel kurva bezier untuk dipakai saat wire dihapus
     TArray<FVector2f> SampledPoints;
+	int32 MissingFrameCount = 0;
 
 	FWireState() = default;
 	FWireState(FVector2f StartPoint, FVector2f EndPoint, float SpringStiffness, float SpringDampeningRatio, float InDesiredSlackMultiplier);
