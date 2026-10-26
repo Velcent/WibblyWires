@@ -73,6 +73,24 @@ FAutoConsoleCommand CVarResetWireStates(
 	})
 );
 
+// True if segment A0-A1 intersects segment B0-B1
+bool SegmentsIntersect2D(const FVector2f& A0, const FVector2f& A1, const FVector2f& B0, const FVector2f& B1)
+{
+	const FVector2f dA = A1 - A0;
+	const FVector2f dB = B1 - B0;
+	const FVector2f d  = B0 - A0;
+
+	const float Den = dA.X * dB.Y - dA.Y * dB.X;
+	if (FMath::IsNearlyZero(Den))
+	{
+		return false; // parallel/collinear
+	}
+
+	const float T = (d.X * dB.Y - d.Y * dB.X) / Den;
+	const float U = (d.X * dA.Y - d.Y * dA.X) / Den;
+	return T >= 0.0f && T <= 1.0f && U >= 0.0f && U <= 1.0f;
+}
+
 FWireState::FWireState(FVector2f StartPoint, FVector2f EndPoint, float SpringStiffness, float SpringDampeningRatio, float InDesiredSlackMultiplier)
 {
 	LastStartPoint = StartPoint;
@@ -709,6 +727,50 @@ void FWibblyConnectionDrawingPolicy::DrawConnection(int32 LayerId, const FVector
 	const FVector2f P0Tangent = (CenterPoint - P0) * 1.3f;
 	const FVector2f P1Tangent = (P1 - CenterPoint) * 1.3f;
 
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7)
+	// --- Alt+Drag (slice) support ---------------------------------------------------
+	// We fully override DrawConnection() and never call the base implementation, so the
+	// engine's slice-line vs spline intersection test (which lives inside
+	// FConnectionDrawingPolicy::DrawConnection since UE5.7) never sees our wibbly curve.
+	// Replicate that test here against the actual wibbly spline so cutting works.
+	if (SliceLine.IsValid() && Params.AssociatedPin1 != nullptr && Params.AssociatedPin2 != nullptr)
+	{
+		const FVector2f SliceStart = SliceLine.StartPoint;
+		const FVector2f SliceEnd   = SliceLine.EndPoint;
+
+		// Cheap reject: control-point bounds of the cubic vs bounds of the slice segment
+		const float MaximumTangentContribution = 1.f / 3.f;
+		FBox2f WireBounds(ForceInit);
+		WireBounds += FVector2f(P0);
+		WireBounds += FVector2f(P0 + MaximumTangentContribution * P0Tangent);
+		WireBounds += FVector2f(P1);
+		WireBounds += FVector2f(P1 - MaximumTangentContribution * P1Tangent);
+
+		FBox2f SliceBounds(ForceInit);
+		SliceBounds += SliceStart;
+		SliceBounds += SliceEnd;
+
+		if (WireBounds.Intersect(SliceBounds))
+		{
+			// Sample the drawn cubic spline and test each chord against the slice segment
+			const int32 NumStepsToTest = 16;
+			const float StepInterval = 1.0f / (float)NumStepsToTest;
+			FVector2f Point1 = FMath::CubicInterp(P0, P0Tangent, P1, P1Tangent, 0.0f);
+			bool bSliceIntersectsWire = false;
+			for (int32 StepIndex = 0; StepIndex < NumStepsToTest && !bSliceIntersectsWire; ++StepIndex)
+			{
+				const FVector2f Point2 = FMath::CubicInterp(P0, P0Tangent, P1, P1Tangent, (StepIndex + 1) * StepInterval);
+				bSliceIntersectsWire = SegmentsIntersect2D(SliceStart, SliceEnd, Point1, Point2);
+				Point1 = Point2;
+			}
+
+			if (bSliceIntersectsWire)
+			{
+				ConnectionsIntersectingSliceLine.Emplace(Params.AssociatedPin1, Params.AssociatedPin2);
+			}
+		}
+	}
+#endif
     // Setelah menghitung CenterPoint, P0Tangent, P1Tangent, tambahkan sampling:
     WireState->SampledPoints.Reset();
     const int32 NumSegments = 20; // Banyaknya segmen tali
