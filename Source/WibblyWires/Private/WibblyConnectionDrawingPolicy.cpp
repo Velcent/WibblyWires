@@ -227,10 +227,24 @@ void FWibblyConnectionDrawingPolicy::Draw(TMap<TSharedRef<SWidget>, FArrangedWid
     TArray<FWireId> DeletedWires;
     for (const auto& Pair : GraphState.Wires)
     {
-        if (!GraphState.ActiveWires.Contains(Pair.Key))
+        if (GraphState.ActiveWires.Contains(Pair.Key))
         {
-            DeletedWires.Add(Pair.Key);
+            continue; // masih digambar frame ini -> wire masih hidup
         }
+
+		UEdGraphPin* StartPin = const_cast<UEdGraphPin*>(Pair.Key.StartPin);
+		UEdGraphPin* EndPin   = const_cast<UEdGraphPin*>(Pair.Key.EndPin);
+
+        // Pin masih valid dan masih saling terhubung => wire hanya sedang tidak terlihat
+        // (di-cull / node di-collapse / di luar view). JANGAN spawn animasi cut.
+	const bool bLinkStillExists = (StartPin != nullptr) && (EndPin != nullptr) && StartPin->LinkedTo.Contains(EndPin);
+        if (bLinkStillExists)
+        {
+            continue;
+        }
+
+        // Sampai sini: koneksi benar-benar putus / node dihapus / preview connector dilepas
+        DeletedWires.Add(Pair.Key);
     }
 
     static const float MaxDeltaTime = 1.f / 30.f;
